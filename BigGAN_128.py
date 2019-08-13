@@ -43,20 +43,23 @@ class BigGAN_128(object):
         self.beta2 = args.beta2
         self.moving_decay = args.moving_decay
 
-        self.custom_dataset = False
+        self.custom_dataset = True
 
-        if self.dataset_name == 'mnist':
-            self.c_dim = 1
-            self.data = load_mnist()
+        self.c_dim = 1 # we only want 1 channel in our case
+        self.data = load_proteins() # load a tuple (data, labels)
 
-        elif self.dataset_name == 'cifar10':
-            self.c_dim = 3
-            self.data = load_cifar10()
+        # if self.dataset_name == 'mnist':
+        #     self.c_dim = 1
+        #     self.data = load_mnist()
 
-        else:
-            self.c_dim = 3
-            self.data = load_data(dataset_name=self.dataset_name)
-            self.custom_dataset = True
+        # elif self.dataset_name == 'cifar10':
+        #     self.c_dim = 3
+        #     self.data = load_cifar10()
+
+        # else:
+        #     self.c_dim = 3
+        #     self.data = load_data(dataset_name=self.dataset_name)
+        #     self.custom_dataset = True
 
         self.dataset_num = len(self.data)
 
@@ -91,9 +94,10 @@ class BigGAN_128(object):
     # Generator
     ##################################################################################
 
-    def generator(self, z, is_training=True, reuse=False):
+    def generator(self, z, label, is_training=True, reuse=False):
+        # TODO TODO TODO TODO MERGE LABELS WITH z INPUT
         with tf.variable_scope("generator", reuse=reuse):
-            # 6
+            # TODO CONCAT SPLIT NOISE WITH LABEL AT EACH RES BLOCK! (128 x 1) with (128 x 51 x 1)
             if self.z_dim == 128:
                 split_dim = 20
                 split_dim_remainder = self.z_dim - (split_dim * 5)
@@ -114,22 +118,27 @@ class BigGAN_128(object):
             x = fully_conneted(z_split[0], units=4 * 4 * ch, sn=self.sn, scope='dense')
             x = tf.reshape(x, shape=[-1, 4, 4, ch])
 
-            x = resblock_up_condition(x, z_split[1], channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_16')
+            cat1 = tf.concat([z_split[1], label], 0)
+            x = resblock_up_condition(x, cat1, channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_16')
             ch = ch // 2
 
-            x = resblock_up_condition(x, z_split[2], channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_8')
+            cat2 = tf.concat([z_split[2], label], 0)
+            x = resblock_up_condition(x, cat2, channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_8')
             ch = ch // 2
 
-            x = resblock_up_condition(x, z_split[3], channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_4')
+            cat3 = tf.concat([z_split[3], label], 0)
+            x = resblock_up_condition(x, cat3, channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_4')
             ch = ch // 2
-
-            x = resblock_up_condition(x, z_split[4], channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_2')
+            
+            cat4 = tf.concat([z_split[4], label], 0)
+            x = resblock_up_condition(x, cat4, channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_2')
 
             # Non-Local Block
             x = self_attention_2(x, channels=ch, sn=self.sn, scope='self_attention')
             ch = ch // 2
 
-            x = resblock_up_condition(x, z_split[5], channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_1')
+            cat5 = tf.concat([z_split[5], label], 0)
+            x = resblock_up_condition(x, cat5, channels=ch, use_bias=False, is_training=is_training, sn=self.sn, scope='resblock_up_1')
 
             x = batch_norm(x, is_training)
             x = relu(x)
@@ -143,7 +152,8 @@ class BigGAN_128(object):
     # Discriminator
     ##################################################################################
 
-    def discriminator(self, x, is_training=True, reuse=False):
+    def discriminator(self, x, label, is_training=True, reuse=False):
+        # TODO TODO TODO TODO MERGE LABELS WITH x INPUT
         with tf.variable_scope("discriminator", reuse=reuse):
             ch = self.ch
 
@@ -173,7 +183,7 @@ class BigGAN_128(object):
 
             return x
 
-    def gradient_penalty(self, real, fake):
+    def gradient_penalty(self, real, fake, label):
         if self.gan_type.__contains__('dragan'):
             eps = tf.random_uniform(shape=tf.shape(real), minval=0., maxval=1.)
             _, x_var = tf.nn.moments(real, axes=[0, 1, 2, 3])
@@ -184,7 +194,7 @@ class BigGAN_128(object):
         alpha = tf.random_uniform(shape=[self.batch_size, 1, 1, 1], minval=0., maxval=1.)
         interpolated = real + alpha * (fake - real)
 
-        logit = self.discriminator(interpolated, reuse=True)
+        logit = self.discriminator(interpolated, label, reuse=True)
 
         grad = tf.gradients(logit, interpolated)[0]  # gradient of D(interpolated)
         grad_norm = tf.norm(flatten(grad), axis=1)  # l2 norm
@@ -211,6 +221,8 @@ class BigGAN_128(object):
         inputs = tf.data.Dataset.from_tensor_slices(self.data)
 
         gpu_device = '/gpu:0'
+
+        # TODO REFACTOR THE BELOW TO USE NORMAL DATA LOAD -----------------------------------------------------------------------
         inputs = inputs.\
             apply(shuffle_and_repeat(self.dataset_num)).\
             apply(map_and_batch(Image_Data_Class.image_processing, self.batch_size, num_parallel_batches=16, drop_remainder=True)).\
@@ -225,14 +237,14 @@ class BigGAN_128(object):
 
         """ Loss Function """
         # output of D for real images
-        real_logits = self.discriminator(self.inputs)
+        real_logits = self.discriminator(self.inputs[0], self.inputs[1]) # discriminate with label info
 
         # output of D for fake images
-        fake_images = self.generator(self.z)
-        fake_logits = self.discriminator(fake_images, reuse=True)
+        fake_images = self.generator(self.z, self.inputs[1]) # generate with the label info
+        fake_logits = self.discriminator(fake_images, self.inputs[1], reuse=True)
 
         if self.gan_type.__contains__('wgan') or self.gan_type == 'dragan':
-            GP = self.gradient_penalty(real=self.inputs, fake=fake_images)
+            GP = self.gradient_penalty(real=self.inputs, fake=fake_images, label=self.inputs[1])
         else:
             GP = 0
 
@@ -258,7 +270,7 @@ class BigGAN_128(object):
 
         """" Testing """
         # for test
-        self.fake_images = self.generator(self.z, is_training=False, reuse=True)
+        self.fake_images = self.generator(self.z, self.inputs[1], is_training=False, reuse=True)
 
         """ Summary """
         self.d_sum = tf.summary.scalar("d_loss", self.d_loss)
